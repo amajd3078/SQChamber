@@ -1,0 +1,1086 @@
+# ==============================================================================
+# #   ____   ____    ____
+# #  / ___| / __ \  / ___|
+# #  \___ \| |  | | | |
+# #   ___) | |__| | | |___
+# #  |____/ \___\_\  \____|
+# ==============================================================================
+# - Name: SQChamber (Ultimate One in the Chamber Engine)
+# - Version: v1.0 (Fully Customizable Options)
+# - Category: PvP MiniGame Engine
+# - Environment: Vanilla Skript (Zero Addons Required)
+# - Compatible Software: Minecraft 1.21.1+ (Paper / Purpur)
+# - Required Plugins: Skript
+# - Tutorial: https://github.com/amajd3078/SQChamber
+# - Discord: https://discord.gg/28pTmAYCwH
+# - Author: amajd3078
+# ==============================================================================
+
+options:
+    prefix: &8[&cSQC&8] &r                  # The chat prefix displayed before plugin messages.
+    max_lives: 3                   # The starting number of lives assigned to each player in a match.
+    max_arena_players: 32          # The maximum allowed player limit for a single arena.
+    game_time: 300                 # The maximum duration of a match in seconds (5 minutes).
+    post_game_wait: 6              # The waiting time in seconds after the match ends before returning players to the hub.
+    spawn_protection: 3            # The duration of spawn invulnerability in seconds upon respawning (0 to disable).
+    start_freeze_time: 5           # The preparation countdown freeze time in seconds at the beginning of a match.
+
+    # --- QUICK COUNTDOWN CONFIGURATION ---
+    countdown_low: 60              # Countdown time in seconds when 25% of arena capacity is filled.
+    countdown_mid: 30              # Countdown time in seconds when 50% of arena capacity is filled.
+    countdown_full: 10             # Countdown time in seconds when 100% of arena capacity is filled.
+
+# --------------------------------------------
+# 0. SCRIPT LOAD / RESTART CLEANUP
+# --------------------------------------------
+on load:
+    loop all players:
+        if {sqc.player_arena::%uuid of loop-player%} is set:
+            clear loop-player's inventory
+            set loop-player's gamemode to survival
+            remove glowing from loop-player
+            if {sqc.hub} is set:
+                teleport loop-player to {sqc.hub}
+            send "{@prefix}&cThe game was reloaded! You have been returned to the Hub." to loop-player
+    
+    delete {sqc.player_arena::*}
+    delete {sqc.in_lobby::*}
+    delete {sqc.in_game::*}
+    delete {sqc.starting_phase::*}
+    delete {sqc.lives::*}
+    delete {sqc.kills::*}
+    delete {sqc.streak::*}
+    delete {sqc.last_spawn::*}
+    delete {sqc.protected::*}
+    delete {sqc.pos1::*}
+    delete {sqc.pos2::*}
+    
+    if {sqc.arenas::*} is set:
+        loop {sqc.arenas::*}:
+            set {sqc.arena.%loop-value%.state} to "WAITING"
+            clear {sqc.arena.%loop-value%.players::*}
+            delete {sqc.arena.%loop-value%.current_leader}
+            delete {sqc.arena.%loop-value%.sudden_death}
+            delete {sqc.arena.%loop-value%.timer}
+            delete {sqc.arena.%loop-value%.game_time_left}
+
+# --------------------------------------------
+# 1. MAIN COMMANDS & BOUNDS SYSTEM
+# --------------------------------------------
+command /sqc [<text>] [<text>] [<integer>] [<text>]:
+    trigger:
+        # --- HUB MANAGEMENT ---
+        if arg-1 is "sethub":
+            if player has permission "sqc.admin":
+                if {sqc.hub} is set:
+                    send "{@prefix}&cHub is already set! Use &e/sqc delhub &cfirst if you want to change it." to player
+                else:
+                    set {sqc.hub} to location of player
+                    send "{@prefix}&aMain Hub location has been set!" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        else if arg-1 is "delhub":
+            if player has permission "sqc.admin":
+                if {sqc.hub} is set:
+                    delete {sqc.hub}
+                    send "{@prefix}&cMain Hub location deleted." to player
+                else:
+                    send "{@prefix}&cNo Hub location is currently set!" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        # --- ARENA CREATION & REMOVAL (WITH ICON) ---
+        else if arg-1 is "addarena":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    set {_max} to arg-3 if arg-3 is set else 16
+                    if {_max} < 2:
+                        send "{@prefix}&cMinimum players for an arena is 2! Setting max players to 2." to player
+                        set {_max} to 2
+                    else if {_max} > {@max_arena_players}:
+                        set {_max} to {@max_arena_players}
+                    
+                    if {sqc.arenas::%arg-2%} is set:
+                        send "{@prefix}&cArena &e%arg-2% &calready exists!" to player
+                    else:
+                        set {sqc.arenas::%arg-2%} to arg-2
+                        set {sqc.arena.%arg-2%.max_players} to {_max}
+                        set {sqc.arena.%arg-2%.state} to "WAITING"
+                        
+                        if arg-4 is set:
+                            set {_item_parse} to arg-4 parsed as an item
+                            if {_item_parse} is set:
+                                set {sqc.arena.%arg-2%.icon} to {_item_parse}
+                            else:
+                                set {sqc.arena.%arg-2%.icon} to grass block
+                        else:
+                            set {sqc.arena.%arg-2%.icon} to grass block
+
+                        send "{@prefix}&aArena &e%arg-2% &acreated with max &e%{_max}% &aplayers &7(Icon: %{sqc.arena.%arg-2%.icon}%)&a." to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc addarena <arena_name> <max_players> [item_icon]" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        else if arg-1 is "delarena":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    if {sqc.arenas::%arg-2%} is set:
+                        delete {sqc.arenas::%arg-2%}
+                        delete {sqc.arena.%arg-2%.lobby}
+                        delete {sqc.arena.%arg-2%.spawns::*}
+                        delete {sqc.arena.%arg-2%.max_players}
+                        delete {sqc.arena.%arg-2%.state}
+                        delete {sqc.arena.%arg-2%.pos1}
+                        delete {sqc.arena.%arg-2%.pos2}
+                        delete {sqc.arena.%arg-2%.icon}
+                        clear {sqc.arena.%arg-2%.players::*}
+                        send "{@prefix}&cArena &e%arg-2% &cand all its data have been deleted!" to player
+                    else:
+                        send "{@prefix}&cArena not found!" to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc delarena <arena_name>" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        # --- POS1 & POS2 BOUNDS SETUP ---
+        else if arg-1 is "pos1":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    if {sqc.arenas::%arg-2%} is set:
+                        set {sqc.arena.%arg-2%.pos1} to location of player
+                        send "{@prefix}&aPosition 1 set for arena &e%arg-2% &aat your location!" to player
+                    else:
+                        send "{@prefix}&cArena &e%arg-2% &cdoes not exist!" to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc pos1 <arena_name>" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        else if arg-1 is "pos2":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    if {sqc.arenas::%arg-2%} is set:
+                        set {sqc.arena.%arg-2%.pos2} to location of player
+                        send "{@prefix}&aPosition 2 set for arena &e%arg-2% &aat your location!" to player
+                    else:
+                        send "{@prefix}&cArena &e%arg-2% &cdoes not exist!" to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc pos2 <arena_name>" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        # --- LOBBY SETUP (RESTRICTED INSIDE BOUNDS) ---
+        else if arg-1 is "setlobby":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    if {sqc.arenas::%arg-2%} is set:
+                        if {sqc.arena.%arg-2%.pos1} is not set:
+                            send "{@prefix}&cYou must set Pos1 and Pos2 for this arena first!" to player
+                            stop
+                        if {sqc.arena.%arg-2%.pos2} is not set:
+                            send "{@prefix}&cYou must set Pos1 and Pos2 for this arena first!" to player
+                            stop
+                        
+                        if location of player is within {sqc.arena.%arg-2%.pos1} and {sqc.arena.%arg-2%.pos2}:
+                            set {sqc.arena.%arg-2%.lobby} to location of player
+                            send "{@prefix}&aLobby point set successfully inside arena &e%arg-2%&a!" to player
+                        else:
+                            send "{@prefix}&cYou must stand INSIDE the arena boundaries (Pos1 & Pos2) to set the lobby!" to player
+                    else:
+                        send "{@prefix}&cArena &e%arg-2% &cdoes not exist!" to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc setlobby <arena_name>" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        # --- ADD SPAWN (RESTRICTED INSIDE BOUNDS) ---
+        else if arg-1 is "addspawn":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    if {sqc.arenas::%arg-2%} is set:
+                        if {sqc.arena.%arg-2%.pos1} is not set:
+                            send "{@prefix}&cYou must set Pos1 and Pos2 for this arena first!" to player
+                            stop
+                        if {sqc.arena.%arg-2%.pos2} is not set:
+                            send "{@prefix}&cYou must set Pos1 and Pos2 for this arena first!" to player
+                            stop
+                        
+                        if location of player is within {sqc.arena.%arg-2%.pos1} and {sqc.arena.%arg-2%.pos2}:
+                            set {_current_spawns} to size of {sqc.arena.%arg-2%.spawns::*}
+                            set {_max_allowed} to {sqc.arena.%arg-2%.max_players}
+                            
+                            if {_current_spawns} >= {_max_allowed}:
+                                send "{@prefix}&cMaximum spawns reached for arena &e%arg-2% &c(&e%{_max_allowed}%&c max)!" to player
+                            else:
+                                add location of player to {sqc.arena.%arg-2%.spawns::*}
+                                set {_new_count} to size of {sqc.arena.%arg-2%.spawns::*}
+                                send "{@prefix}&aAdded valid spawn point ##%{_new_count}%/&e%{_max_allowed}% &afor arena &e%arg-2%&a!" to player
+                        else:
+                            send "{@prefix}&cYou must stand INSIDE the arena boundaries (Pos1 & Pos2) to add a spawn!" to player
+                    else:
+                        send "{@prefix}&cArena does not exist!" to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc addspawn <arena_name>" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        else if arg-1 is "delspawn":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    if {sqc.arenas::%arg-2%} is set:
+                        set {_size} to size of {sqc.arena.%arg-2%.spawns::*}
+                        if {_size} is 0:
+                            send "{@prefix}&cNo spawn points set for arena &e%arg-2%&c!" to player
+                        else:
+                            if arg-3 is set:
+                                if {sqc.arena.%arg-2%.spawns::%arg-3%} is set:
+                                    delete {sqc.arena.%arg-2%.spawns::%arg-3%}
+                                    send "{@prefix}&cRemoved spawn point ##%arg-3% for arena &e%arg-2%&c." to player
+                                else:
+                                    send "{@prefix}&cInvalid spawn number! Current total spawns: &e%{_size}%" to player
+                            else:
+                                delete {sqc.arena.%arg-2%.spawns::%{_size}%}
+                                send "{@prefix}&cRemoved last spawn point (##%{_size}%) for arena &e%arg-2%&c." to player
+                    else:
+                        send "{@prefix}&cArena does not exist!" to player
+                else:
+                    send "{@prefix}&cUsage: &e/sqc delspawn <arena_name> [spawn_number]" to player
+            else:
+                send "{@prefix}&cYou don't have permission." to player
+
+        else if arg-1 is "clearspawns":
+            if player has permission "sqc.admin":
+                if arg-2 is set:
+                    delete {sqc.arena.%arg-2%.spawns::*}
+                    send "{@prefix}&cCleared all spawns for arena &e%arg-2%&c." to player
+
+        # --- ARENA LIST WITH STATUS & MISSING REQUIREMENTS ---
+        else if arg-1 is "arenalist":
+            send "{@prefix}&eAvailable Arenas & Missing Requirements:" to player
+            if size of {sqc.arenas::*} is 0:
+                send "&7No arenas configured yet." to player
+            else:
+                loop {sqc.arenas::*}:
+                    set {_a} to loop-value
+                    set {_count} to size of {sqc.arena.%{_a}%.players::*}
+                    set {_max} to {sqc.arena.%{_a}%.max_players}
+                    set {_st} to {sqc.arena.%{_a}%.state}
+                    set {_spawns_cnt} to size of {sqc.arena.%{_a}%.spawns::*}
+                    
+                    clear {_missing::*}
+                    if {sqc.arena.%{_a}%.lobby} is not set:
+                        add "Lobby" to {_missing::*}
+                    if {_spawns_cnt} < 2:
+                        add "Spawns (<2)" to {_missing::*}
+                    
+                    if size of {_missing::*} > 0:
+                        send "&8- &f%{_a}% &c[Incomplete] &7- Missing: &c%{_missing::*}%" to player
+                    else:
+                        send "&8- &f%{_a}% &7(&e%{_count}%&7/&e%{_max}%&7) - Spawns: &e%{_spawns_cnt}%/%{_max}% &7- Status: &a%{_st}%" to player
+
+        # --- JOIN ARENA GUI COMMAND ---
+        else if arg-1 is "joining":
+            execute console command "sqc-open-joining-gui %player%"
+
+        # --- JOIN ARENA ---
+        else if arg-1 is "join":
+            if {sqc.player_arena::%uuid of player%} is set:
+                send "{@prefix}&cYou are already in an arena! Type &e/sqc leave &cfirst." to player
+                stop
+
+            set {_target_arena} to ""
+            if arg-2 is set:
+                if {sqc.arenas::%arg-2%} is set:
+                    set {_target_arena} to arg-2
+                else:
+                    send "{@prefix}&cArena &e%arg-2% &cdoes not exist!" to player
+                    stop
+            else:
+                loop {sqc.arenas::*}:
+                    set {_a} to loop-value
+                    set {_spawns_cnt} to size of {sqc.arena.%{_a}%.spawns::*}
+                    if {sqc.arena.%{_a}%.lobby} is set:
+                        if {_spawns_cnt} >= 2:
+                            if {sqc.arena.%{_a}%.state} is "WAITING" or "STARTING":
+                                if size of {sqc.arena.%{_a}%.players::*} < {sqc.arena.%{_a}%.max_players}:
+                                    set {_target_arena} to {_a}
+                                    stop loop
+            
+            if {_target_arena} is "":
+                send "{@prefix}&cNo available arenas found at the moment!" to player
+                stop
+
+            set {_a} to {_target_arena}
+            
+            if {sqc.arena.%{_a}%.state} is "PLAYING" or "ENDING":
+                send "{@prefix}&cYou cannot join! The match has already started." to player
+                stop
+
+            if {sqc.arena.%{_a}%.lobby} is not set:
+                send "{@prefix}&cThis arena setup is incomplete (Missing Lobby)!" to player
+                stop
+            if size of {sqc.arena.%{_a}%.spawns::*} is 0:
+                send "{@prefix}&cThis arena setup is incomplete (Missing Spawns)!" to player
+                stop
+
+            add player to {sqc.arena.%{_a}%.players::*}
+            set {sqc.player_arena::%uuid of player%} to {_a}
+            set {sqc.in_lobby::%uuid of player%} to true
+            
+            clear player's inventory
+            set player's gamemode to adventure
+            teleport player to {sqc.arena.%{_a}%.lobby}
+
+            set {_count} to size of {sqc.arena.%{_a}%.players::*}
+            set {_max} to {sqc.arena.%{_a}%.max_players}
+
+            send "{@prefix}&aJoined arena &e%{_a}%&a!" to player
+
+            loop {sqc.arena.%{_a}%.players::*}:
+                send "{@prefix}&e%player% &7joined! (&e%{_count}%&7/&e%{_max}%&7)" to loop-value
+
+            if {sqc.arena.%{_a}%.state} is "WAITING" or "STARTING":
+                execute console command "sqc-check-countdown-threshold %{_a}%"
+
+        # --- LEAVE GAME ---
+        else if arg-1 is "leave":
+            execute console command "sqc-leave-logic %player% true"
+
+        else:
+            send "{@prefix}&7Commands List:" to player
+            send "&e/sqc join [arena] &7- Join a game (Random if empty)" to player
+            send "&e/sqc joining &7- Open Arena Selector Menu" to player
+            send "&e/sqc leave &7- Return to Main Hub" to player
+            send "&e/sqc arenalist &7- View available arenas" to player
+            if player has permission "sqc.admin":
+                send "&e/sqc sethub &7| &e/sqc delhub &7- Manage Hub" to player
+                send "&e/sqc addarena <name> <max> [item] &7| &e/sqc delarena <name>" to player
+                send "&e/sqc pos1 <name> &7| &e/sqc pos2 <name> &7- Set Arena Bounds" to player
+                send "&e/sqc setlobby <name> &7| &e/sqc addspawn <name> &7| &e/sqc delspawn <name>" to player
+
+# --------------------------------------------
+# 1.1 JOINING GUI SYSTEM (6 ROWS - ERROR FIXED)
+# --------------------------------------------
+command /sqc-open-joining-gui [<player>]:
+    permission: console
+    trigger:
+        set {_p} to arg-1
+        set {_gui} to a new chest inventory with 6 rows named "&8[&cSQC&8] &7Select Arena"
+        
+        set {_border} to black stained glass pane named "&8"
+        
+        # --- وضع الزجاج الأسود على الحواف الخارجية للـ 6 صفوف بالكامل ---
+        set {_i} to 0
+        loop 54 times:
+            set {_row} to floor({_i} / 9)
+            set {_col} to mod({_i}, 9)
+            if {_row} = 0:
+                set slot {_i} of {_gui} to {_border}
+            else if {_row} = 5:
+                set slot {_i} of {_gui} to {_border}
+            else if {_col} = 0:
+                set slot {_i} of {_gui} to {_border}
+            else if {_col} = 8:
+                set slot {_i} of {_gui} to {_border}
+            add 1 to {_i}
+
+        # --- وضع عين الإندر في منتصف الصف الأخير داخل القائمة (الخانة رقم 49) ---
+        set {_random_join} to ender eye named "&d&lRandom Join" with lore "&7Click to join a random available arena!"
+        set slot 49 of {_gui} to {_random_join}
+
+        # --- توزيع الأرينات داخل المساحة الداخلية ---
+        set {_slot} to 10
+        loop {sqc.arenas::*}:
+            set {_row} to floor({_slot} / 9)
+            set {_col} to mod({_slot}, 9)
+            
+            while {_col} = 0:
+                add 1 to {_slot}
+                set {_row} to floor({_slot} / 9)
+                set {_col} to mod({_slot}, 9)
+            while {_col} = 8:
+                add 1 to {_slot}
+                set {_row} to floor({_slot} / 9)
+                set {_col} to mod({_slot}, 9)
+            while {_row} = 0:
+                add 1 to {_slot}
+                set {_row} to floor({_slot} / 9)
+                set {_col} to mod({_slot}, 9)
+            while {_row} = 5:
+                add 1 to {_slot}
+                set {_row} to floor({_slot} / 9)
+                set {_col} to mod({_slot}, 9)
+
+            if {_slot} < 53:
+                if {_slot} is not 49:
+                    set {_a} to loop-value
+                    set {_cnt} to size of {sqc.arena.%{_a}%.players::*}
+                    set {_max} to {sqc.arena.%{_a}%.max_players}
+                    set {_state} to {sqc.arena.%{_a}%.state}
+                    set {_spawns_cnt} to size of {sqc.arena.%{_a}%.spawns::*}
+                    
+                    set {_icon} to {sqc.arena.%{_a}%.icon} if {sqc.arena.%{_a}%.icon} is set else grass block
+                    
+                    # فحص النواقص بدون شروط مركبة معقدة
+                    set {_incomplete} to false
+                    if {sqc.arena.%{_a}%.lobby} is not set:
+                        set {_incomplete} to true
+                    if {_spawns_cnt} < 2:
+                        set {_incomplete} to true
+                    
+                    if {_incomplete} is true:
+                        set {_item} to barrier named "&c&l%{_a}% &7(&cComing Soon&7)"
+                        set lore of {_item} to "&cSetup Incomplete!" and "&7- Missing Lobby or Spawns"
+                    else:
+                        set {_item} to {_icon} named "&e&lArena: &f%{_a}%"
+                        if {_state} is "WAITING":
+                            set lore of {_item} to "&7Status: &aWaiting..." and "&7Players: &e%{_cnt}%&7/&e%{_max}%" and "" and "&aClick to Join!"
+                        else if {_state} is "STARTING":
+                            set lore of {_item} to "&7Status: &eStarting..." and "&7Players: &e%{_cnt}%&7/&e%{_max}%" and "" and "&aClick to Join!"
+                        else:
+                            set lore of {_item} to "&7Status: &cGame In Progress" and "&7Players: &e%{_cnt}%&7/&e%{_max}%" and "" and "&cMatch has already started!"
+
+                    set slot {_slot} of {_gui} to {_item}
+            add 1 to {_slot}
+
+        open {_gui} to {_p}
+
+on inventory click:
+    if name of player's current inventory is "&8[&cSQC&8] &7Select Arena":
+        cancel event
+        if event-slot is air:
+            stop
+            
+        # --- الانضمام العشوائي عبر عين الإندر (الخانة 49) ---
+        if index of event-slot is 49:
+            close player's inventory
+            clear {_valid_arenas::*}
+            loop {sqc.arenas::*}:
+                set {_a} to loop-value
+                set {_spawns_cnt} to size of {sqc.arena.%{_a}%.spawns::*}
+                if {sqc.arena.%{_a}%.lobby} is set:
+                    if {_spawns_cnt} >= 2:
+                        if {sqc.arena.%{_a}%.state} is "WAITING" or "STARTING":
+                            if size of {sqc.arena.%{_a}%.players::*} < {sqc.arena.%{_a}%.max_players}:
+                                add {_a} to {_valid_arenas::*}
+            
+            if size of {_valid_arenas::*} > 0:
+                set {_rand} to random element out of {_valid_arenas::*}
+                execute player command "sqc join %{_rand}%"
+            else:
+                send "{@prefix}&cNo complete or available arenas found for random join!" to player
+            stop
+            
+        # --- الانضمام لأرينا محددة عبر النقر ---
+        set {_item} to event-slot
+        if name of {_item} is set:
+            set {_name} to uncolored name of {_item}
+            replace "Arena: " with "" in {_name}
+            replace " (Coming Soon)" with "" in {_name}
+            
+            if {sqc.arenas::%{_name}%} is set:
+                close player's inventory
+                execute player command "sqc join %{_name}%"
+
+# --------------------------------------------
+# 2. HUB COMMAND (/hub & LEAVE LOGIC)
+# --------------------------------------------
+command /hub:
+    trigger:
+        execute console command "sqc-leave-logic %player% true"
+
+command /sqc-leave-logic [<player>] [<boolean>]:
+    permission: console
+    trigger:
+        set {_p} to arg-1
+        set {_manual} to arg-2 if arg-2 is set else false
+        
+        if {sqc.player_arena::%uuid of {_p}%} is set:
+            set {_a} to {sqc.player_arena::%uuid of {_p}%}
+            
+            if {_manual} is true:
+                if {sqc.arena.%{_a}%.state} is "PLAYING":
+                    set {_active_count} to size of {sqc.arena.%{_a}%.players::*}
+                    if {_active_count} <= 1:
+                        remove {_p} from {sqc.arena.%{_a}%.players::*}
+                        remove glowing from {_p}
+                        delete {sqc.player_arena::%uuid of {_p}%}
+                        delete {sqc.in_lobby::%uuid of {_p}%}
+                        delete {sqc.in_game::%uuid of {_p}%}
+                        delete {sqc.starting_phase::%uuid of {_p}%}
+                        delete {sqc.lives::%uuid of {_p}%}
+                        delete {sqc.kills::%uuid of {_p}%}
+                        delete {sqc.streak::%uuid of {_p}%}
+                        delete {sqc.last_spawn::%uuid of {_p}%}
+                        delete {sqc.protected::%uuid of {_p}%}
+                        clear {_p}'s inventory
+                        set {_p}'s gamemode to survival
+                        if {sqc.hub} is set:
+                            teleport {_p} to {sqc.hub}
+                            send "{@prefix}&cReturned to the Main Hub." to {_p}
+                        loop {sqc.arena.%{_a}%.players::*}:
+                            execute console command "sqc-leave-logic %loop-value% false"
+                        clear {sqc.arena.%{_a}%.players::*}
+                        delete {sqc.arena.%{_a}%.sudden_death}
+                        set {sqc.arena.%{_a}%.state} to "WAITING"
+                        stop
+
+            remove {_p} from {sqc.arena.%{_a}%.players::*}
+            remove glowing from {_p}
+            
+            delete {sqc.player_arena::%uuid of {_p}%}
+            delete {sqc.in_lobby::%uuid of {_p}%}
+            delete {sqc.in_game::%uuid of {_p}%}
+            delete {sqc.starting_phase::%uuid of {_p}%}
+            delete {sqc.lives::%uuid of {_p}%}
+            delete {sqc.kills::%uuid of {_p}%}
+            delete {sqc.streak::%uuid of {_p}%}
+            delete {sqc.last_spawn::%uuid of {_p}%}
+            delete {sqc.protected::%uuid of {_p}%}
+
+            clear {_p}'s inventory
+            set {_p}'s gamemode to survival
+
+            if {sqc.hub} is set:
+                teleport {_p} to {sqc.hub}
+                if {_manual} is true:
+                    send "{@prefix}&cReturned to the Main Hub." to {_p}
+            else:
+                if {_manual} is true:
+                    send "{@prefix}&cLeft game! (No Hub set via /sqc sethub)" to {_p}
+
+            if {_manual} is true:
+                loop {sqc.arena.%{_a}%.players::*}:
+                    send "{@prefix}&e%{_p}% &7left the game." to loop-value
+            
+            if {sqc.arena.%{_a}%.state} is "STARTING":
+                execute console command "sqc-check-countdown-threshold %{_a}%"
+            else if {sqc.arena.%{_a}%.state} is "PLAYING":
+                execute console command "sqc-check-glowing-leader %{_a}%"
+                execute console command "sqc-check-win %{_a}%"
+        else:
+            if {sqc.hub} is set:
+                teleport {_p} to {sqc.hub}
+            else:
+                send "{@prefix}&cNo Hub set!" to {_p}
+
+# --------------------------------------------
+# 3. DYNAMIC COUNTDOWN THRESHOLDS & TIMER
+# --------------------------------------------
+command /sqc-check-countdown-threshold [<text>]:
+    permission: console
+    trigger:
+        set {_a} to arg-1
+        set {_count} to size of {sqc.arena.%{_a}%.players::*}
+        set {_max} to {sqc.arena.%{_a}%.max_players}
+
+        if {_max} is 2:
+            if {_count} >= 2:
+                set {sqc.arena.%{_a}%.timer} to {@countdown_full}
+                if {sqc.arena.%{_a}%.state} is not "STARTING":
+                    execute console command "sqc-start-countdown %{_a}%"
+            else:
+                if {sqc.arena.%{_a}%.state} is "STARTING":
+                    set {sqc.arena.%{_a}%.state} to "WAITING"
+                    loop {sqc.arena.%{_a}%.players::*}:
+                        send "{@prefix}&cCountdown paused! Need 2 players." to loop-value
+            stop
+
+        set {_p25} to max(2, rounded ({_max} * 0.25))
+        set {_p50} to rounded ({_max} * 0.50)
+
+        if {_count} >= {_max}:
+            set {sqc.arena.%{_a}%.timer} to min({sqc.arena.%{_a}%.timer}, {@countdown_full})
+            if {sqc.arena.%{_a}%.state} is not "STARTING":
+                execute console command "sqc-start-countdown %{_a}%"
+
+        else if {_count} >= {_p50}:
+            if {sqc.arena.%{_a}%.state} is "STARTING":
+                set {sqc.arena.%{_a}%.timer} to min({sqc.arena.%{_a}%.timer}, {@countdown_mid})
+            else:
+                set {sqc.arena.%{_a}%.timer} to {@countdown_mid}
+                execute console command "sqc-start-countdown %{_a}%"
+
+        else if {_count} >= {_p25}:
+            if {sqc.arena.%{_a}%.state} is "STARTING":
+                if {sqc.arena.%{_a}%.timer} < {@countdown_mid}:
+                    set {sqc.arena.%{_a}%.timer} to {@countdown_mid}
+            else:
+                set {sqc.arena.%{_a}%.timer} to {@countdown_low}
+                execute console command "sqc-start-countdown %{_a}%"
+
+        else:
+            if {sqc.arena.%{_a}%.state} is "STARTING":
+                set {sqc.arena.%{_a}%.state} to "WAITING"
+                loop {sqc.arena.%{_a}%.players::*}:
+                    send "{@prefix}&cCountdown paused! Need at least %{_p25}% players." to loop-value
+
+command /sqc-start-countdown [<text>]:
+    permission: console
+    trigger:
+        set {_a} to arg-1
+        if {sqc.arena.%{_a}%.state} is "STARTING":
+            stop
+            
+        set {sqc.arena.%{_a}%.state} to "STARTING"
+
+        while {sqc.arena.%{_a}%.timer} > 0:
+            if {sqc.arena.%{_a}%.state} is not "STARTING":
+                stop
+
+            set {_t} to {sqc.arena.%{_a}%.timer}
+            set {_cnt} to size of {sqc.arena.%{_a}%.players::*}
+            set {_max} to {sqc.arena.%{_a}%.max_players}
+            
+            loop {sqc.arena.%{_a}%.players::*}:
+                set {_p} to loop-value
+                send action bar "&eStarting in: &c%{_t}%s &7(&e%{_cnt}%&7/&e%{_max}%&7)" to {_p}
+                if {_t} <= 5:
+                    play sound "block.note_block.pling" with pitch 1.5 to {_p}
+                    send title "&c%{_t}%" to {_p} for 1 second
+
+            subtract 1 from {sqc.arena.%{_a}%.timer}
+            wait 1 second
+
+        if {sqc.arena.%{_a}%.state} is "STARTING":
+            set {sqc.arena.%{_a}%.state} to "PLAYING"
+            delete {sqc.arena.%{_a}%.current_leader}
+            delete {sqc.arena.%{_a}%.sudden_death}
+            
+            loop {sqc.arena.%{_a}%.players::*}:
+                set {_p} to loop-value
+                delete {sqc.in_lobby::%uuid of {_p}%}
+                set {sqc.in_game::%uuid of {_p}%} to true
+                set {sqc.starting_phase::%uuid of {_p}%} to true
+                set {sqc.lives::%uuid of {_p}%} to {@max_lives}
+                set {sqc.kills::%uuid of {_p}%} to 0
+                set {sqc.streak::%uuid of {_p}%} to 0
+
+                set {_a_name} to {sqc.player_arena::%uuid of {_p}%}
+                sqc_teleport_spawn({_p}, {_a_name})
+                set {sqc.freeze_loc::%uuid of {_p}%} to location of {_p}
+                
+                set {_p}'s gamemode to survival
+                execute console command "sqc-kit %{_p}%"
+                send title "&c&lGET READY!" with subtitle "&eMatch starts in {@start_freeze_time} seconds!" to {_p} for {@start_freeze_time} seconds
+                play sound "block.note_block.bass" with pitch 0.5 to {_p}
+
+            set {_freeze} to {@start_freeze_time}
+            while {_freeze} > 0:
+                loop {sqc.arena.%{_a}%.players::*}:
+                    send action bar "&c&lPREPARING &7- Match starts in &e%{_freeze}%s" to loop-value
+                wait 1 second
+                subtract 1 from {_freeze}
+
+            loop {sqc.arena.%{_a}%.players::*}:
+                delete {sqc.starting_phase::%uuid of loop-value%}
+                delete {sqc.freeze_loc::%uuid of loop-value%}
+                send title "&a&lFIGHT!" with subtitle "&fEliminate opponents!" to loop-value for 2 seconds
+                play sound "entity.player.levelup" with pitch 1.5 to loop-value
+
+            execute console command "sqc-game-timer %{_a}%"
+
+command /sqc-game-timer [<text>]:
+    permission: console
+    trigger:
+        set {_a} to arg-1
+        set {sqc.arena.%{_a}%.game_time_left} to {@game_time}
+        
+        while {sqc.arena.%{_a}%.game_time_left} > 0:
+            if {sqc.arena.%{_a}%.state} is not "PLAYING":
+                stop
+            
+            set {_m} to floor({sqc.arena.%{_a}%.game_time_left} / 60)
+            set {_s} to mod({sqc.arena.%{_a}%.game_time_left}, 60)
+            set {_formatted} to "%{_m}%m %{_s}%s"
+            
+            loop {sqc.arena.%{_a}%.players::*}:
+                set {_p} to loop-value
+                set {_k} to {sqc.kills::%uuid of {_p}%} if {sqc.kills::%uuid of {_p}%} is set else 0
+                set {_strk} to {sqc.streak::%uuid of {_p}%} if {sqc.streak::%uuid of {_p}%} is set else 0
+                set {_l} to {sqc.lives::%uuid of {_p}%} if {sqc.lives::%uuid of {_p}%} is set else 0
+                set {_ping} to {_p}'s ping
+                
+                if {sqc.arena.%{_a}%.sudden_death} is true:
+                    send action bar "&c&lOVERTIME &7| &eLives: &c1 &7| &eKills: &a%{_k}% &7| &ePing: &b%{_ping}%ms" to {_p}
+                else:
+                    send action bar "&eTime: &c%{_formatted}% &7| &eKills: &a%{_k}% &7| &eStreak: &d%{_strk}% &7| &eLives: &c%{_l}% &7| &ePing: &b%{_ping}%ms" to {_p}
+
+            subtract 1 from {sqc.arena.%{_a}%.game_time_left}
+            wait 1 second
+            
+        if {sqc.arena.%{_a}%.state} is "PLAYING":
+            loop {sqc.arena.%{_a}%.players::*}:
+                send "{@prefix}&c&lTIME IS UP!" to loop-value
+            execute console command "sqc-check-win %{_a}% true"
+
+# --------------------------------------------
+# 4. ACTIONBAR WAITING LOOP & FREEZE LOCK
+# --------------------------------------------
+every 1 second:
+    loop all players:
+        set {_p} to loop-player
+        if {sqc.in_lobby::%uuid of {_p}%} is true:
+            set {_a} to {sqc.player_arena::%uuid of {_p}%}
+            if {sqc.arena.%{_a}%.state} is "WAITING":
+                set {_cnt} to size of {sqc.arena.%{_a}%.players::*}
+                set {_max} to {sqc.arena.%{_a}%.max_players}
+                send action bar "&eWaiting for players... &7(&e%{_cnt}%&7/&e%{_max}%&7)" to {_p}
+
+on player move:
+    if {sqc.starting_phase::%uuid of player%} is true:
+        if {sqc.freeze_loc::%uuid of player%} is set:
+            set {_to} to location of player
+            set {_from} to {sqc.freeze_loc::%uuid of player%}
+            if x-coord of {_to} is not x-coord of {_from}:
+                teleport player to {_from}
+            else if z-coord of {_to} is not z-coord of {_from}:
+                teleport player to {_from}
+
+# --------------------------------------------
+# 5. COMBAT, STREAK, RESPAWN & HEAL ON KILL
+# --------------------------------------------
+on damage:
+    if {sqc.in_lobby::%uuid of victim%} is true:
+        cancel event
+
+on damage:
+    if {sqc.starting_phase::%uuid of attacker%} is true:
+        cancel event
+        send "{@prefix}&cYou cannot attack during the start countdown!" to attacker
+        stop
+    if {sqc.starting_phase::%uuid of victim%} is true:
+        cancel event
+        stop
+
+on shoot:
+    if {sqc.starting_phase::%uuid of shooter%} is true:
+        cancel event
+        send "{@prefix}&cYou cannot shoot your bow during the start countdown!" to shooter
+
+on damage:
+    if {sqc.in_game::%uuid of victim%} is true:
+        if {sqc.protected::%uuid of victim%} is true:
+            cancel event
+            if attacker is a player:
+                send "{@prefix}&cThis player has spawn protection!" to attacker
+            stop
+
+on damage:
+    if {sqc.in_game::%uuid of attacker%} is true:
+        if {sqc.in_game::%uuid of victim%} is true:
+            if damage cause is projectile:
+                if projectile is an arrow:
+                    set damage to 999
+
+on break:
+    if {sqc.player_arena::%uuid of player%} is set:
+        cancel event
+
+on place:
+    if {sqc.player_arena::%uuid of player%} is set:
+        cancel event
+
+on death:
+    if victim is a player:
+        if {sqc.in_game::%uuid of victim%} is true:
+            clear drops
+            set {sqc.streak::%uuid of victim%} to 0
+            delete {sqc.protected::%uuid of victim%}
+            
+            if attacker is a player:
+                if {sqc.in_game::%uuid of attacker%} is true:
+                    add 1 to {sqc.kills::%uuid of attacker%}
+                    add 1 to {sqc.streak::%uuid of attacker%}
+                    
+                    heal attacker
+                    set attacker's food level to 20
+                    
+                    give 1 arrow to attacker
+                    send "{@prefix}&a+1 Arrow &7| &a&lFully Healed!" to attacker
+                    play sound "entity.experience_orb.pickup" with pitch 1.5 to attacker
+
+                    set {_stk} to {sqc.streak::%uuid of attacker%}
+                    if mod({_stk}, 5) is 0:
+                        set {_a} to {sqc.player_arena::%uuid of attacker%}
+                        loop {sqc.arena.%{_a}%.players::*}:
+                            send "{@prefix}&d&lSTREAK! &f%attacker% &7is on a &d&l%{_stk}% Killstreak&7!" to loop-value
+                            play sound "entity.player.levelup" with pitch 1.2 to loop-value
+
+            subtract 1 from {sqc.lives::%uuid of victim%}
+            
+            if {sqc.lives::%uuid of victim%} > 0:
+                send "{@prefix}&cLives left: &e%{sqc.lives::%uuid of victim%}%" to victim
+            else:
+                send "{@prefix}&cYou ran out of lives! You are now spectating." to victim
+                set {sqc.in_game::%uuid of victim%} to false
+                set victim's gamemode to spectator
+                
+            set {_a} to {sqc.player_arena::%uuid of victim%}
+            execute console command "sqc-check-glowing-leader %{_a}%"
+            execute console command "sqc-check-win %{_a}%"
+
+on respawn:
+    if {sqc.player_arena::%uuid of player%} is set:
+        set {_a} to {sqc.player_arena::%uuid of player%}
+        if {sqc.lives::%uuid of player%} > 0:
+            wait 1 tick
+            if {sqc.player_arena::%uuid of player%} is set:
+                sqc_teleport_spawn(player, {_a})
+                wait 2 ticks
+                execute console command "sqc-kit %player%"
+                
+                set {_prot} to {@spawn_protection}
+                if {_prot} > 0:
+                    set {sqc.protected::%uuid of player%} to true
+                    apply resistance to player for 3 seconds
+                    send "{@prefix}&bSpawn Protection active for &e%{_prot}% &bseconds!" to player
+                    
+                    wait 3 seconds
+                    if {sqc.player_arena::%uuid of player%} is set:
+                        delete {sqc.protected::%uuid of player%}
+                        send "{@prefix}&cSpawn Protection expired!" to player
+        else:
+            if {sqc.arena.%{_a}%.lobby} is set:
+                wait 1 tick
+                teleport player to {sqc.arena.%{_a}%.lobby}
+                set player's gamemode to spectator
+
+# --- INTERNAL FUNCTION FOR SMART DISTANCE-BASED SPAWN WITHIN BOUNDS ---
+function sqc_teleport_spawn(p: player, a: text):
+    set {_size} to size of {sqc.arena.%{_a}%.spawns::*}
+    if {_size} > 0:
+        clear {_opponents::*}
+        loop {sqc.arena.%{_a}%.players::*}:
+            if loop-value is not {_p}:
+                if {sqc.lives::%uuid of loop-value%} > 0:
+                    add loop-value to {_opponents::*}
+
+        if size of {_opponents::*} is 0:
+            set {_loc} to random element out of {sqc.arena.%{_a}%.spawns::*}
+            set {sqc.last_spawn::%uuid of {_p}%} to {_loc}
+            teleport {_p} to {_loc}
+            stop
+
+        set {_best_loc} to random element out of {sqc.arena.%{_a}%.spawns::*}
+        set {_max_dist} to -1
+
+        loop {sqc.arena.%{_a}%.spawns::*}:
+            set {_loc} to loop-value
+            set {_min_dist_to_opp} to 999999
+            
+            loop {_opponents::*}:
+                set {_dist} to distance between {_loc} and location of loop-value-2
+                if {_dist} < {_min_dist_to_opp}:
+                    set {_min_dist_to_opp} to {_dist}
+
+            if {_min_dist_to_opp} > {_max_dist}:
+                set {_max_dist} to {_min_dist_to_opp}
+                set {_best_loc} to {_loc}
+
+        set {sqc.last_spawn::%uuid of {_p}%} to {_best_loc}
+        teleport {_p} to {_best_loc}
+
+# --- GLOWING TARGET LEADER SYSTEM ---
+command /sqc-check-glowing-leader [<text>]:
+    permission: console
+    trigger:
+        set {_a} to arg-1
+        if {sqc.arena.%{_a}%.state} is not "PLAYING":
+            stop
+
+        if {sqc.arena.%{_a}%.sudden_death} is true:
+            if {sqc.arena.%{_a}%.current_leader} is set:
+                remove glowing from {sqc.arena.%{_a}%.current_leader}
+                delete {sqc.arena.%{_a}%.current_leader}
+            stop
+
+        set {_max_lives_found} to -1
+        loop {sqc.arena.%{_a}%.players::*}:
+            if {sqc.lives::%uuid of loop-value%} > 0:
+                if {sqc.lives::%uuid of loop-value%} > {_max_lives_found}:
+                    set {_max_lives_found} to {sqc.lives::%uuid of loop-value%}
+
+        clear {_leaders::*}
+        loop {sqc.arena.%{_a}%.players::*}:
+            if {sqc.lives::%uuid of loop-value%} is {_max_lives_found}:
+                add loop-value to {_leaders::*}
+
+        if size of {_leaders::*} is 1:
+            set {_new_leader} to {_leaders::1}
+            
+            if {sqc.arena.%{_a}%.current_leader} is not {_new_leader}:
+                if {sqc.arena.%{_a}%.current_leader} is set:
+                    remove glowing from {sqc.arena.%{_a}%.current_leader}
+
+                set {sqc.arena.%{_a}%.current_leader} to {_new_leader}
+                apply glowing to {_new_leader} for 999 days
+
+                loop {sqc.arena.%{_a}%.players::*}:
+                    send "{@prefix}&e&lTARGET! &f%{_new_leader}% &7is leading with &c%{_max_lives_found}% Lives&7! (GLOWING)" to loop-value
+                    play sound "entity.ender_dragon.growl" with volume 0.5 and pitch 1.8 to loop-value
+        else:
+            if {sqc.arena.%{_a}%.current_leader} is set:
+                remove glowing from {sqc.arena.%{_a}%.current_leader}
+                delete {sqc.arena.%{_a}%.current_leader}
+
+# --------------------------------------------
+# 6. WIN CONDITION, OVERTIME & ENDGAME LOGIC (WITH SHARED COINS)
+# --------------------------------------------
+command /sqc-check-win [<text>] [<boolean>]:
+    permission: console
+    trigger:
+        set {_a} to arg-1
+        set {_force} to false
+        if arg-2 is set:
+            set {_force} to arg-2
+        
+        if {sqc.arena.%{_a}%.state} is not "PLAYING":
+            stop
+
+        clear {_alive::*}
+        loop {sqc.arena.%{_a}%.players::*}:
+            if {sqc.lives::%uuid of loop-value%} > 0:
+                add loop-value to {_alive::*}
+
+        if size of {_alive::*} is 1:
+            set {_winner} to {_alive::1}
+            execute console command "sqc-end-game %{_a}% %{_winner}%"
+            stop
+
+        if size of {_alive::*} is 0:
+            execute console command "sqc-end-game %{_a}% Unknown"
+            stop
+
+        if {_force} is true:
+            set {_max_l} to -1
+            loop {_alive::*}:
+                if {sqc.lives::%uuid of loop-value%} > {_max_l}:
+                    set {_max_l} to {sqc.lives::%uuid of loop-value%}
+
+            clear {_top::*}
+            loop {_alive::*}:
+                if {sqc.lives::%uuid of loop-value%} is {_max_l}:
+                    add loop-value to {_top::*}
+
+            if size of {_top::*} is 1:
+                execute console command "sqc-end-game %{_a}% %{_top::1}%"
+            else if size of {_top::*} > 1:
+                set {sqc.arena.%{_a}%.sudden_death} to true
+                if {sqc.arena.%{_a}%.current_leader} is set:
+                    remove glowing from {sqc.arena.%{_a}%.current_leader}
+                    delete {sqc.arena.%{_a}%.current_leader}
+
+                loop {sqc.arena.%{_a}%.players::*}:
+                    send "{@prefix}&c&lSUDDEN DEATH! &eOvertime tie-breaker starting with 1 Life!" to loop-value
+                    if {_top::*} does not contain loop-value:
+                        set loop-value's gamemode to spectator
+                    else:
+                        set {sqc.lives::%uuid of loop-value%} to 1
+
+command /sqc-end-game [<text>] [<player>]:
+    permission: console
+    trigger:
+        set {_a} to arg-1
+        set {_w} to arg-2
+        set {sqc.arena.%{_a}%.state} to "ENDING"
+
+        if {sqc.arena.%{_a}%.current_leader} is set:
+            remove glowing from {sqc.arena.%{_a}%.current_leader}
+            delete {sqc.arena.%{_a}%.current_leader}
+
+        # --- GIVE SHARED COINS TO WINNER ---
+        if {_w} is a player:
+            add 50 to {sqc.coins::%uuid of {_w}%}
+            send "{@prefix}&a+50 Coins for winning the match!" to {_w}
+
+        # --- CALCULATE TOP 3 KILLS ---
+        clear {_kills_list::*}
+        loop {sqc.arena.%{_a}%.players::*}:
+            set {_p_name} to "%loop-value%"
+            set {_p_kills} to {sqc.kills::%uuid of loop-value%} if {sqc.kills::%uuid of loop-value%} is set else 0
+            set {_kills_list::%{_p_name}%} to {_p_kills}
+
+        clear {_top_1}
+        clear {_top_2}
+        clear {_top_3}
+        set {_max1} to -1
+        set {_max2} to -1
+        set {_max3} to -1
+
+        loop {_kills_list::*}:
+            if loop-value > {_max1}:
+                set {_max3} to {_max2}
+                set {_top_3} to {_top_2}
+                set {_max2} to {_max1}
+                set {_top_2} to {_top_1}
+                set {_max1} to loop-value
+                set {_top_1} to loop-index
+            else if loop-value > {_max2}:
+                set {_max3} to {_max2}
+                set {_top_3} to {_top_2}
+                set {_max2} to loop-value
+                set {_top_2} to loop-index
+            else if loop-value > {_max3}:
+                set {_max3} to loop-value
+                set {_top_3} to loop-index
+
+        # --- ANNOUNCE & DISPLAY TITLES ---
+        loop {sqc.arena.%{_a}%.players::*}:
+            set {_p} to loop-value
+            
+            if {_p} is {_w}:
+                send title "&a&lVICTORY!" with subtitle "&fYou won the match!" to {_p} for 4 seconds
+                play sound "ui.toast.challenge_complete" to {_p}
+            else:
+                send title "&c&lGAME OVER" with subtitle "&f%{_w}% won the match!" to {_p} for 4 seconds
+                play sound "entity.wither.spawn" with volume 0.5 and pitch 1.5 to {_p}
+                
+                send "{@prefix}&a=================================" to {_p}
+                send "       &e&lWINNER: &f%{_w}%" to {_p}
+                send "       &a=================================" to {_p}
+
+            send "{@prefix}&e&lTOP 3 KILLS:" to {_p}
+            if {_top_1} is set:
+                send " &81. &e%{_top_1}% &7- &a%{_max1}% Kills" to {_p}
+            if {_top_2} is set:
+                send " &82. &f%{_top_2}% &7- &a%{_max2}% Kills" to {_p}
+            if {_top_3} is set:
+                send " &83. &c%{_top_3}% &7- &a%{_max3}% Kills" to {_p}
+
+        wait {@post_game_wait} seconds
+
+        loop {sqc.arena.%{_a}%.players::*}:
+            execute console command "sqc-leave-logic %loop-value% false"
+
+        clear {sqc.arena.%{_a}%.players::*}
+        delete {sqc.arena.%{_a}%.sudden_death}
+        set {sqc.arena.%{_a}%.state} to "WAITING"
+
+# --------------------------------------------
+# 7. UTILITIES
+# --------------------------------------------
+on disconnect:
+    execute console command "sqc-leave-logic %player% true"
+
+on join:
+    if {sqc.hub} is set:
+        teleport player to {sqc.hub}
+
+on projectile hit:
+    if projectile is an arrow:
+        delete projectile
+
+on pickup of arrow:
+    cancel event
+
+command /sqc-kit [<player>]:
+    permission: console
+    trigger:
+        set {_p} to arg-1
+        clear {_p}'s inventory
+        give 1 wooden sword to {_p}
+        give 1 bow to {_p}
+        give 1 arrow to {_p}
